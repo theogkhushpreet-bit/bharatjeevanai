@@ -1,52 +1,145 @@
-import express from "express";
-import OpenAI from "openai";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+require("dotenv").config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const app = express();
-const port = Number(process.env.PORT || 8787);
-const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
-const model = process.env.OPENAI_MODEL || "gpt-6-astra";
 
-app.use(express.json({ limit: "1mb" }));
-app.use(express.static(__dirname));
+// ===============================
+// BASIC CONFIG
+// ===============================
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
+// Serve frontend/static files
+app.use(express.static(path.join(__dirname, "public")));
+
+// ===============================
+// HEALTH CHECK
+// ===============================
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, aiConfigured: Boolean(client), model, webSearch: Boolean(client) });
+  res.json({
+    success: true,
+    message: "Bharat Jeevan AI server is running",
+    status: "online"
+  });
 });
 
-const instructions = `You are Bharat Jeevan AI, a citizen/family intelligence assistant inside an Indian public-service prototype. Analyze the supplied structured family profile and the user's question. Be practical, concise and action-oriented. Separate facts from suggestions. Never claim official government eligibility unless verified. For health, organize information and advise professional care when appropriate; do not diagnose or prescribe. Do not request unnecessary sensitive identifiers. When web search is available, prefer authoritative Indian government sources for schemes, laws, deadlines and public services, and mention uncertainty when sources conflict.`;
+// ===============================
+// HOME PAGE
+// ===============================
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
+// ===============================
+// AI API
+// ===============================
 app.post("/api/ai", async (req, res) => {
-  if (!client) return res.status(503).json({ error: "OpenAI backend is not configured." });
-  const { question, profile, mode = "auto" } = req.body || {};
-  if (typeof question !== "string" || !question.trim()) return res.status(400).json({ error: "Question is required." });
   try {
-    const webRequired = mode === "web";
-    const response = await client.responses.create({
-      model,
-      instructions,
-      tools: [{ type: "web_search", search_context_size: "medium" }],
-      ...(webRequired ? { tool_choice: "required" } : {}),
-      input: [{ role: "user", content: `User question:\n${question}\n\nStructured family profile:\n${JSON.stringify(profile || {}, null, 2)}` }]
-    });
-    const sources = [];
-    for (const item of response.output || []) {
-      if (item.type === "message") {
-        for (const c of item.content || []) {
-          for (const a of c.annotations || []) {
-            if (a.type === "url_citation" && a.url) sources.push({ title: a.title || a.url, url: a.url });
-          }
-        }
-      }
+    const { message } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Message is required"
+      });
     }
-    res.json({ answer: response.output_text || "No answer returned.", mode: webRequired ? "web" : "ai", sources: [...new Map(sources.map(s => [s.url, s])).values()].slice(0, 8) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err?.message || "AI request failed." });
+
+    // Check API key
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: "OPENAI_API_KEY is not configured on the server."
+      });
+    }
+
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+    // OpenAI API request
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are Bharat Jeevan AI, an intelligent assistant designed to help people across India. Give clear, practical, accurate and easy-to-understand answers."
+          },
+          {
+            role: "user",
+            content: message
+          }
+        ],
+        temperature: 0.7
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("OpenAI error:", data);
+
+      return res.status(response.status).json({
+        success: false,
+        error:
+          data?.error?.message ||
+          "The AI service returned an error."
+      });
+    }
+
+    const answer =
+      data?.choices?.[0]?.message?.content ||
+      "Sorry, I could not generate a response.";
+
+    res.json({
+      success: true,
+      answer: answer
+    });
+
+  } catch (error) {
+    console.error("Server error:", error);
+
+    res.status(500).json({
+      success: false,
+      error: "Internal server error."
+    });
   }
 });
 
-app.listen(port, () => console.log(`Bharat Jeevan AI running at http://localhost:${port}`));
+// ===============================
+// FALLBACK FOR FRONTEND ROUTES
+// ===============================
+app.get("*", (req, res) => {
+  // Don't interfere with API routes
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({
+      success: false,
+      error: "API route not found"
+    });
+  }
+
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// ===============================
+// LOCAL SERVER
+// ===============================
+const PORT = process.env.PORT || 3000;
+
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => {
+    console.log(`Bharat Jeevan AI running on port ${PORT}`);
+  });
+}
+
+// ===============================
+// IMPORTANT FOR VERCEL
+// ===============================
+module.exports = app;
